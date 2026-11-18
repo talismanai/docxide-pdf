@@ -9,6 +9,7 @@ mod pdf;
 
 pub use error::Error;
 pub use fonts::memory::{clear_fonts, register_font, use_system_fonts};
+pub use fonts::requests::{FontRequest, take_font_requests};
 pub use pdf::bookmarks::{BookmarkPosition, take_bookmark_positions};
 
 use crate::clock::Instant;
@@ -194,6 +195,7 @@ pub fn convert_docx_bytes_to_pdf_bytes_with(
 }
 
 fn reset_conversion_metadata() {
+    fonts::requests::reset();
     take_bookmark_positions();
 }
 
