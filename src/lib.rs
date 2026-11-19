@@ -31,6 +31,63 @@ pub enum RevisionView {
     Markup,
 }
 
+/// Invisible link annotations over the text laid out between two bookmarks:
+/// from `start` (a `w:bookmarkStart` name) to `end` (another one), wherever
+/// they sit — between paragraphs or tables, or between the runs of a line.
+///
+/// Every line holding text (or a picture) of the range gets the link, as the
+/// box of its glyphs in that range; per page, the range's first and last
+/// lines keep their own rectangle and the lines in between share one, so a
+/// range has at most three rectangles a page. Only the document body is
+/// covered: headers, footers and notes are not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RangeLink {
+    /// The bookmark the range starts at.
+    pub start: String,
+    /// The bookmark the range ends at; the text before it is in the range.
+    pub end: String,
+    /// The link's URI action.
+    pub uri: String,
+    /// A second link over the range's heading, when it has one: its leading
+    /// lines on the first page it reaches, while every run on them is bold
+    /// (at most four lines, without a gap taller than a line between them).
+    pub heading_uri: Option<String>,
+}
+
+impl RangeLink {
+    pub fn new(start: impl Into<String>, end: impl Into<String>, uri: impl Into<String>) -> Self {
+        Self {
+            start: start.into(),
+            end: end.into(),
+            uri: uri.into(),
+            heading_uri: None,
+        }
+    }
+
+    pub fn heading_uri(mut self, uri: impl Into<String>) -> Self {
+        self.heading_uri = Some(uri.into());
+        self
+    }
+}
+
+/// `START END URI [HEADING_URI]`, separated by whitespace (which neither a
+/// bookmark name nor a URI contains): the spelling of `DOCXIDE_RANGE_LINKS`
+/// lines and of `--range-link`.
+impl std::str::FromStr for RangeLink {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let fields: Vec<&str> = text.split_whitespace().collect();
+        match fields[..] {
+            [start, end, uri] => Ok(Self::new(start, end, uri)),
+            [start, end, uri, heading] => Ok(Self::new(start, end, uri).heading_uri(heading)),
+            _ => Err(format!(
+                "range link {text:?}: expected START END URI [HEADING_URI]"
+            )),
+        }
+    }
+}
+
 /// Per-conversion settings. The defaults reproduce Word's online export; each
 /// option moves one behaviour towards desktop Word or adapts the conversion to
 /// its host. Explicit options never read the environment;
@@ -59,6 +116,10 @@ pub struct ConvertOptions {
     /// [`Compression::Fast`] for a PDF that stays on its host. Environment:
     /// `DOCXIDE_COMPRESSION=fast`.
     pub compression: Compression,
+    /// Link annotations to write over bookmarked ranges of text (none by
+    /// default). Environment: `DOCXIDE_RANGE_LINKS`, one
+    /// `START END URI [HEADING_URI]` per line; a malformed line is ignored.
+    pub range_links: Vec<RangeLink>,
 }
 
 impl Default for ConvertOptions {
@@ -70,6 +131,7 @@ impl Default for ConvertOptions {
             font_cache: true,
             debug_wrap: false,
             compression: Compression::Smallest,
+            range_links: Vec::new(),
         }
     }
 }
@@ -121,6 +183,9 @@ impl ConvertOptions {
         if var("DOCXIDE_COMPRESSION").is_some_and(|v| v.trim().eq_ignore_ascii_case("fast")) {
             options.compression = Compression::Fast;
         }
+        if let Some(links) = var("DOCXIDE_RANGE_LINKS") {
+            options.range_links = links.lines().filter_map(|line| line.parse().ok()).collect();
+        }
         options
     }
 
@@ -154,6 +219,11 @@ impl ConvertOptions {
         self
     }
 
+    pub fn range_links(mut self, links: impl IntoIterator<Item = RangeLink>) -> Self {
+        self.range_links = links.into_iter().collect();
+        self
+    }
+
     pub(crate) fn font_setup(&self) -> fonts::FontSetup {
         fonts::FontSetup {
             dirs: self.font_dirs.clone(),
@@ -174,7 +244,7 @@ pub fn convert_docx_to_pdf_with(
 ) -> Result<(), Error> {
     reset_conversion_metadata();
     reject_old_env_vars()?;
-    let doc = docx::parse(input.as_ref(), options.revisions)?;
+    let doc = docx::parse(input.as_ref(), options)?;
     render_and_write(&doc, path, options)
 }
 
@@ -190,7 +260,7 @@ pub fn convert_docx_bytes_to_pdf_with(
 ) -> Result<(), Error> {
     reset_conversion_metadata();
     reject_old_env_vars()?;
-    let doc = docx::parse_bytes(input, options.revisions)?;
+    let doc = docx::parse_bytes_with(input, options)?;
     render_and_write(&doc, path, options)
 }
 
@@ -206,7 +276,7 @@ pub fn convert_docx_bytes_to_pdf_bytes_with(
 ) -> Result<Vec<u8>, Error> {
     reset_conversion_metadata();
     reject_old_env_vars()?;
-    let doc = docx::parse_bytes(input, options.revisions)?;
+    let doc = docx::parse_bytes_with(input, options)?;
     pdf::render(&doc, options)
 }
 
@@ -331,5 +401,24 @@ mod tests {
         assert_eq!(built.compression, Compression::Fast);
         assert!(!built.resample_pictures && !built.font_cache && built.debug_wrap);
         assert_eq!(built.font_setup().dirs, [PathBuf::from("x")]);
+    }
+
+    #[test]
+    fn range_links_read_from_lines_of_start_end_uri_and_heading() {
+        let link = |vars: &str| {
+            ConvertOptions::from_vars(|name| (name == "DOCXIDE_RANGE_LINKS").then(|| vars.into()))
+                .range_links
+        };
+        assert!(ConvertOptions::new().range_links.is_empty());
+        assert_eq!(
+            link("a b x:1\n\n  c  d x:2 x:h \nbad line\ne f g h i"),
+            [
+                RangeLink::new("a", "b", "x:1"),
+                RangeLink::new("c", "d", "x:2").heading_uri("x:h"),
+            ]
+        );
+        assert!("a b".parse::<RangeLink>().is_err());
+        let built = ConvertOptions::new().range_links([RangeLink::new("a", "b", "x:1")]);
+        assert_eq!(built.range_links.len(), 1);
     }
 }
