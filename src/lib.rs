@@ -1,4 +1,5 @@
 mod clock;
+mod compression;
 mod docx;
 mod error;
 mod fonts;
@@ -7,6 +8,7 @@ mod math;
 mod model;
 mod pdf;
 
+pub use compression::Compression;
 pub use error::Error;
 pub use fonts::memory::{clear_fonts, register_font, use_system_fonts};
 pub use fonts::requests::{FontRequest, take_font_requests};
@@ -52,6 +54,10 @@ pub struct ConvertOptions {
     /// Draw the float wrap zones on the page. Environment:
     /// `DOCXIDE_DEBUG_WRAP=1`.
     pub debug_wrap: bool,
+    /// How hard the streams are compressed: the smallest file by default,
+    /// [`Compression::Fast`] for a PDF that stays on its host. Environment:
+    /// `DOCXIDE_COMPRESSION=fast`.
+    pub compression: Compression,
 }
 
 impl Default for ConvertOptions {
@@ -62,6 +68,7 @@ impl Default for ConvertOptions {
             font_dirs: Vec::new(),
             font_cache: true,
             debug_wrap: false,
+            compression: Compression::Smallest,
         }
     }
 }
@@ -110,6 +117,9 @@ impl ConvertOptions {
         if flag("DOCXIDE_DEBUG_WRAP") {
             options.debug_wrap = true;
         }
+        if var("DOCXIDE_COMPRESSION").is_some_and(|v| v.trim().eq_ignore_ascii_case("fast")) {
+            options.compression = Compression::Fast;
+        }
         options
     }
 
@@ -135,6 +145,11 @@ impl ConvertOptions {
 
     pub fn debug_wrap(mut self, on: bool) -> Self {
         self.debug_wrap = on;
+        self
+    }
+
+    pub fn compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
         self
     }
 
@@ -269,6 +284,17 @@ mod tests {
         assert_eq!(plain.revisions, RevisionView::Final);
         assert!(plain.resample_pictures && plain.font_cache && !plain.debug_wrap);
         assert!(plain.font_dirs.is_empty());
+        assert_eq!(plain.compression, Compression::Smallest);
+        for not_fast in ["", "smallest", "1"] {
+            assert_eq!(
+                with(&[("DOCXIDE_COMPRESSION", not_fast)]).compression,
+                Compression::Smallest
+            );
+        }
+        assert_eq!(
+            with(&[("DOCXIDE_COMPRESSION", " Fast ")]).compression,
+            Compression::Fast
+        );
         for off in ["0", "false", "", " False "] {
             assert!(with(&[("DOCXIDE_NO_RESAMPLE", off)]).resample_pictures);
         }
@@ -298,8 +324,10 @@ mod tests {
             .resample_pictures(false)
             .font_dirs(["x"])
             .font_cache(false)
-            .debug_wrap(true);
+            .debug_wrap(true)
+            .compression(Compression::Fast);
         assert_eq!(built.revisions, RevisionView::Markup);
+        assert_eq!(built.compression, Compression::Fast);
         assert!(!built.resample_pictures && !built.font_cache && built.debug_wrap);
         assert_eq!(built.font_setup().dirs, [PathBuf::from("x")]);
     }
