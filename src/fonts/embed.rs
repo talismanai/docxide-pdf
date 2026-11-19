@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
 use pdf_writer::{Filter, Name, Pdf, Rect, Ref, Str};
@@ -7,6 +7,7 @@ use ttf_parser::gpos::{PairAdjustment, PositioningSubtable};
 
 use super::encoding::winansi_to_char;
 use super::{FontContext, FontMetrics, FontRefs};
+use crate::fast_hash::FastMap;
 
 pub(super) fn embed_truetype(
     pdf: &mut Pdf,
@@ -52,9 +53,10 @@ pub(super) fn embed_truetype(
         .collect();
 
     let mut remapper = subsetter::GlyphRemapper::new();
-    let mut char_to_gid = HashMap::with_capacity(used_chars.len());
-    let mut char_widths_1000 = HashMap::with_capacity(used_chars.len());
-    let mut char_ink_1000 = HashMap::with_capacity(used_chars.len());
+    let mut char_to_gid = FastMap::with_capacity_and_hasher(used_chars.len(), Default::default());
+    let mut char_widths_1000 =
+        FastMap::with_capacity_and_hasher(used_chars.len(), Default::default());
+    let mut char_ink_1000 = FastMap::with_capacity_and_hasher(used_chars.len(), Default::default());
 
     // HashSet order differs per process, and the remapper numbers glyphs in visit order:
     // sorting keeps the subset, and so the PDF bytes, the same from run to run.
@@ -72,7 +74,7 @@ pub(super) fn embed_truetype(
         }
     }
 
-    let mut gid_remap = HashMap::new();
+    let mut gid_remap = FastMap::default();
     let mut extra_widths = Vec::new();
     for (&gid, &ch) in ctx.extra_glyphs.into_iter().flatten() {
         let new_gid = remapper.remap(gid);
@@ -114,7 +116,7 @@ pub(super) fn embed_truetype(
         *id = code(*id);
     }
 
-    let mut kern_pairs = HashMap::new();
+    let mut kern_pairs = FastMap::default();
     let char_gids: Vec<(ttf_parser::GlyphId, u16)> = char_to_gid
         .iter()
         .filter_map(|(&ch, &cid)| {
@@ -498,7 +500,7 @@ fn extract_kern_pairs(
     face: &Face,
     char_gids: &[(ttf_parser::GlyphId, u16)],
     to_1000: &impl Fn(f32) -> f32,
-    kern_pairs: &mut HashMap<(u16, u16), f32>,
+    kern_pairs: &mut FastMap<(u16, u16), f32>,
 ) {
     let Some(kern) = face.tables().kern else {
         return;
@@ -525,7 +527,7 @@ fn extract_gpos_pairs(
     face: &Face,
     char_gids: &[(ttf_parser::GlyphId, u16)],
     to_1000: &impl Fn(f32) -> f32,
-    kern_pairs: &mut HashMap<(u16, u16), f32>,
+    kern_pairs: &mut FastMap<(u16, u16), f32>,
 ) {
     let Some(gpos) = face.tables().gpos else {
         return;
@@ -741,8 +743,8 @@ mod tests {
             data,
             0,
             &FontContext {
-                embedded_fonts: &HashMap::new(),
-                font_table: &HashMap::new(),
+                embedded_fonts: &std::collections::HashMap::new(),
+                font_table: &std::collections::HashMap::new(),
                 used_chars: &chars.chars().collect(),
                 word_text: true,
                 extra_glyphs: None,
