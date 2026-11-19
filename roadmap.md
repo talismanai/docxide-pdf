@@ -10,6 +10,13 @@ carrying `bookmarkStart`, not the full range up to `bookmarkEnd`. Header/footer
 and text-box positions are not exported. Keep these limits explicit if extending
 the API.
 
+**Range links:** `ConvertOptions::range_links` covers body and cell text and
+inline pictures. Not covered: list labels (a range that opens a numbered
+paragraph links its text, not its number), floating pictures anchored in the
+range, headers/footers and notes, rotated text boxes (their lines are linked
+unrotated), and the extra Tc spacing of character-justified (CJK) lines inside
+a partly linked word.
+
 **East Asian layout and float leads (2026-11-16):**
 - compat-14 `compressPunctuation` past the marks: once each mark has given
   0.5 em, the autoSpaceDE gap before the pulled Latin word shrinks from

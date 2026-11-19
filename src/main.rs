@@ -33,6 +33,11 @@ struct Args {
     /// a larger file (same as DOCXIDE_COMPRESSION=fast)
     #[arg(long)]
     fast_compression: bool,
+    /// An invisible link over the text between two bookmarks, as
+    /// "START END URI [HEADING_URI]"; repeatable (replaces
+    /// DOCXIDE_RANGE_LINKS, one such line per link)
+    #[arg(long, value_name = "LINK")]
+    range_link: Vec<docxide_pdf::RangeLink>,
 }
 
 fn available_path(path: PathBuf) -> PathBuf {
@@ -96,6 +101,9 @@ fn main() {
     }
     if args.fast_compression {
         options = options.compression(docxide_pdf::Compression::Fast);
+    }
+    if !args.range_link.is_empty() {
+        options = options.range_links(args.range_link);
     }
     if let Err(e) = docxide_pdf::convert_docx_to_pdf_with(&args.input, &output, &options) {
         eprintln!("Error: {e}");

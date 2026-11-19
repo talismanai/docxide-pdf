@@ -199,6 +199,39 @@ Positions are **thread-local**: convert and read them on the same thread.
 Starting a conversion clears the previous positions, even if parsing fails, and
 `take_bookmark_positions` drains them.
 
+### Range links
+
+`ConvertOptions::range_links` writes invisible link annotations over the text
+laid out between two bookmarks, so a viewer can link a place in the PDF back
+to whatever produced it:
+
+```rust
+use docxide_pdf::{ConvertOptions, RangeLink, convert_docx_bytes_to_pdf_bytes_with};
+
+let options = ConvertOptions::new().range_links([
+    RangeLink::new("start", "end", "app:item/1"),
+    // A second link over the range's heading: its leading bold lines.
+    RangeLink::new("start2", "end2", "app:item/2").heading_uri("app:heading/2"),
+]);
+let pdf = convert_docx_bytes_to_pdf_bytes_with(&docx_bytes, &options)?;
+```
+
+A range runs from the `bookmarkStart` named `start` to the one named `end`,
+wherever they sit: between paragraphs and tables, or between the runs of a line
+(the link then starts or stops inside the line, inside a word if the runs
+split one). Every line holding text or a picture of the range gets the link,
+as the box of the range's glyphs on it (advance widths, the face's `hhea`
+ascender and descender) or of the picture. Per page, the range's first and
+last lines keep their own rectangle and the lines in between share one: at
+most three rectangles a page. `heading_uri` adds one more link over the
+range's leading lines on its first page while every run on them is bold (at
+most four lines, no gap taller than a line between them). Only the body is
+covered (table cells and inline pictures included; headers, footers, notes,
+list labels and floating pictures are not), and links follow section vertical
+alignment. A
+range whose bookmarks are missing or out of order links nothing; without range
+links the PDF is unchanged.
+
 ### Hosts without a filesystem (WebAssembly)
 
 From a source checkout, compile the library for the bare wasm target:
@@ -291,6 +324,7 @@ Each setting can be given as a CLI flag, through `ConvertOptions`, or as a `DOCX
 | Scan the font directories on every conversion instead of reading the font index disk cache. Useful when debugging font resolution | Cache on | `--no-font-cache` | `.font_cache(false)` | `DOCXIDE_NO_FONT_CACHE=1` |
 | Draw the float wrap zones on the page (debugging) | Off | `--debug-wrap` | `.debug_wrap(true)` | `DOCXIDE_DEBUG_WRAP=1` |
 | Compress every stream at zlib level 1: the same PDF once decompressed, written several times faster, a larger file. For a PDF shown where it is made (a preview) | Smallest file (level 9 for page content and object streams, 6 for fonts and pictures) | `--fast-compression` | `.compression(Compression::Fast)` | `DOCXIDE_COMPRESSION=fast` |
+| Invisible links over the text between two bookmarks (see [Range links](#range-links)) | None | `--range-link "START END URI [HEADING_URI]"` (repeat for more) | `.range_links([RangeLink::new(start, end, uri)])` | `DOCXIDE_RANGE_LINKS`, one `START END URI [HEADING_URI]` per line |
 
 When you use docxide-pdf as a library, build a `ConvertOptions` and pass it to one of the `_with` functions:
 

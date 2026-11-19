@@ -92,7 +92,8 @@ src/
                  wordart.rs, bidi.rs, comments.rs (comment pane), fonts.rs (per-document font set),
                  tagging.rs (PDF/UA structure tree), assembly.rs (pages, borders, document objects),
                  objstm.rs (object streams), color.rs, helpers.rs (border geometry), bookmarks.rs
-                 (where bookmarked paragraphs were laid out, for `take_bookmark_positions`)
+                 (where bookmarked paragraphs were laid out, for `take_bookmark_positions`),
+                 range_links.rs (link annotations over bookmarked ranges, `ConvertOptions::range_links`)
   fonts/       — mod.rs (FontEntry, metrics, font keys), resolve.rs (resolution, substitution, fallback,
                  registration), discovery.rs (cross-platform search), cache.rs (TSV index cache), embed.rs
                  (subsetting, kern/GPOS, line metrics), encoding.rs (WinAnsi), memory.rs (fonts a host
@@ -102,7 +103,7 @@ src/
 tests/
   suite/main.rs       — the one integration-test binary; modules visual_comparison, accessibility,
                         text_boundary, font_validation, image_count, page_geometry, file_size,
-                        bookmark_positions, host (host fonts and requests),
+                        bookmark_positions, range_links, host (host fonts and requests),
                         libreoffice_comparison (DOCXIDE_LO_COMPARE=1), speed (#[ignore])
   common/             — shared harness: fixtures, conversion, baselines, per-case score caches,
                         metrics.rs (rasterization, Jaccard/SSIM), a11y.rs, text_boundary.rs
@@ -146,8 +147,10 @@ private sverrejb/docxide-pdf-assets repo, so `cargo run`/`cargo test` see it
 but a bare binary needs `DOCXIDE_FONTS=$PWD/fonts`), `DOCXIDE_NO_FONT_CACHE`,
 `DOCXIDE_DEBUG_WRAP` (draw wrap zones), `DOCXIDE_REVISIONS=markup` (All
 Markup view; default is the final text), `DOCXIDE_NO_RESAMPLE` (keep picture
-pixels instead of the export's 192 ppi). CLI flags: `--fonts`,
-`--no-font-cache`, `--debug-wrap`, `--markup`, `--no-resample`.
+pixels instead of the export's 192 ppi), `DOCXIDE_COMPRESSION=fast`,
+`DOCXIDE_RANGE_LINKS` (one `START END URI [HEADING_URI]` per line). CLI flags:
+`--fonts`, `--no-font-cache`, `--debug-wrap`, `--markup`, `--no-resample`,
+`--fast-compression`, `--range-link`.
 
 ## Working alongside other sessions
 
