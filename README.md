@@ -290,6 +290,7 @@ Each setting can be given as a CLI flag, through `ConvertOptions`, or as a `DOCX
 | Extra font directories, searched before the system fonts. The first one listed wins, and system fonts fill in what they lack (see [Fonts](#fonts)) | None | `--fonts DIR` (repeat for more) | `.font_dirs(["DIR", ...])` | `DOCXIDE_FONTS=DIR1:DIR2` (`;` on Windows) |
 | Scan the font directories on every conversion instead of reading the font index disk cache. Useful when debugging font resolution | Cache on | `--no-font-cache` | `.font_cache(false)` | `DOCXIDE_NO_FONT_CACHE=1` |
 | Draw the float wrap zones on the page (debugging) | Off | `--debug-wrap` | `.debug_wrap(true)` | `DOCXIDE_DEBUG_WRAP=1` |
+| Compress every stream at zlib level 1: the same PDF once decompressed, written several times faster, a larger file. For a PDF shown where it is made (a preview) | Smallest file (level 9 for page content and object streams, 6 for fonts and pictures) | `--fast-compression` | `.compression(Compression::Fast)` | `DOCXIDE_COMPRESSION=fast` |
 
 When you use docxide-pdf as a library, build a `ConvertOptions` and pass it to one of the `_with` functions:
 

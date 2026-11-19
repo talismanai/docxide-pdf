@@ -29,6 +29,10 @@ struct Args {
     /// Draw the float wrap zones on the page (same as DOCXIDE_DEBUG_WRAP=1)
     #[arg(long)]
     debug_wrap: bool,
+    /// Compress every stream at zlib level 1: written several times faster,
+    /// a larger file (same as DOCXIDE_COMPRESSION=fast)
+    #[arg(long)]
+    fast_compression: bool,
 }
 
 fn available_path(path: PathBuf) -> PathBuf {
@@ -89,6 +93,9 @@ fn main() {
     }
     if args.debug_wrap {
         options = options.debug_wrap(true);
+    }
+    if args.fast_compression {
+        options = options.compression(docxide_pdf::Compression::Fast);
     }
     if let Err(e) = docxide_pdf::convert_docx_to_pdf_with(&args.input, &output, &options) {
         eprintln!("Error: {e}");

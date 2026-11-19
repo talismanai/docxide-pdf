@@ -3,7 +3,7 @@ use std::io::{Cursor, Write};
 use std::sync::{Arc, Barrier};
 
 use docxide_pdf::{
-    ConvertOptions, clear_fonts, convert_docx_bytes_to_pdf_bytes_with, register_font,
+    Compression, ConvertOptions, clear_fonts, convert_docx_bytes_to_pdf_bytes_with, register_font,
     take_font_requests, use_system_fonts,
 };
 
@@ -185,4 +185,67 @@ fn host_requests_belong_to_the_converting_thread() {
     for thread in threads {
         thread.join().unwrap();
     }
+}
+
+/// `paragraphs` paragraphs of text in `font`.
+fn long_document(font: &str, paragraphs: usize) -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file(
+        "word/document.xml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    write!(zip, r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#).unwrap();
+    for i in 0..paragraphs {
+        write!(zip, r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="{font}" w:hAnsi="{font}"/></w:rPr><w:t>- -- --- {i} - -- ---</w:t></w:r></w:p>"#).unwrap();
+    }
+    write!(zip, r#"<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>"#).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+/// Every stream of `pdf` inflated (or as stored when it is not zlib), except
+/// the cross-reference stream, whose byte offsets follow the file's size.
+fn inflated_streams(pdf: &[u8]) -> Vec<Vec<u8>> {
+    let mut streams: Vec<Vec<u8>> = pdf
+        .windows(7)
+        .enumerate()
+        // `stream` opens a stream's data; `endstream` closes it.
+        .filter(|&(start, w)| w == b"stream\n" && !pdf[..start].ends_with(b"end"))
+        .filter(|&(start, _)| {
+            let dictionary = &pdf[start.saturating_sub(300)..start];
+            !dictionary.windows(5).any(|w| w == b"/XRef")
+        })
+        .filter_map(|(start, _)| {
+            let data = &pdf[start + 7..];
+            let end = data.windows(10).position(|w| w == b"\nendstream")?;
+            let raw = &data[..end];
+            Some(miniz_oxide::inflate::decompress_to_vec_zlib(raw).unwrap_or_else(|_| raw.to_vec()))
+        })
+        .collect();
+    streams.sort();
+    streams
+}
+
+#[test]
+fn fast_compression_writes_the_same_pdf_once_inflated() {
+    let _host = Host::new();
+    assert!(register_font(FONT.to_vec()) > 0);
+    let input = long_document(&font_name(), 400);
+    let with = |compression| {
+        convert_docx_bytes_to_pdf_bytes_with(
+            &input,
+            &ConvertOptions::new()
+                .font_cache(false)
+                .compression(compression),
+        )
+        .unwrap()
+    };
+    let smallest = with(Compression::Smallest);
+    let fast = with(Compression::Fast);
+    assert!(fast.starts_with(b"%PDF-"));
+    assert_ne!(fast, smallest);
+    assert!(fast.len() > smallest.len());
+    let streams = inflated_streams(&smallest);
+    assert!(streams.len() > 3);
+    assert_eq!(inflated_streams(&fast), streams);
 }
