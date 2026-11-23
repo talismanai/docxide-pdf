@@ -311,3 +311,18 @@ Pull requests are welcome!
 ## License
 
 Apache-2.0
+
+## Links over bookmark ranges
+
+Use `ConvertOptions::new().range_links([docxide_pdf::RangeLink::new(
+"start", "end", "https://example.org/section")])` to add invisible URI
+annotations over body/cell text and inline pictures between two named
+`w:bookmarkStart` elements. Each range has at most three rectangles per page.
+An optional `.heading_uri(...)` links its leading bold lines separately. The CLI
+accepts repeatable `--range-link "START END URI [HEADING_URI]"` arguments, or
+`DOCXIDE_RANGE_LINKS` with one link per line; explicit arguments replace the
+environment list. Missing or reversed bookmark pairs are ignored.
+
+Headers, footers, notes, list labels and floating pictures are not covered.
+Rotated text boxes and character-justified CJK partial-word ranges have the
+geometry limits recorded in the roadmap. The library never reads the environment.
