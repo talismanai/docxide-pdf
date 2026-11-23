@@ -5,6 +5,14 @@ Open work only. Finished rounds, their rules and evidence live in git history
 
 ## Open fixture leads
 
+**Range links:** `ConvertOptions::range_links` covers body and cell text and
+inline pictures. Not covered: list labels (a range that opens a numbered
+paragraph links its text, not its number), floating pictures anchored in the
+range, headers/footers and notes, rotated text boxes (their lines are linked
+unrotated), and the extra Tc spacing of character-justified (CJK) lines inside
+a partly linked word.
+
+
 **East Asian layout and float leads (2026-11-16):**
 - compat-14 `compressPunctuation` past the marks: once each mark has given
   0.5 em, the autoSpaceDE gap before the pulled Latin word shrinks from
@@ -977,6 +985,19 @@ All are meant to keep output identical unless the entry says otherwise.
   follows it on purpose.
 - Repeated WinAnsi conversion (line building, rendering, autofit);
   allocating `font_key()` at 9 sites; `WordChunk` clones font names.
+- Layout leads left by the layout-perf pass (2026-11-19; case13 with
+  in-memory fonts, native: layout 137 -> 64 ms; wasm in Node 310 -> 200 ms
+  total), by share of case13 after it: drawing lines
+  (`render_paragraph_lines`) ~27%, of which `device_grid` ~12% (its
+  `drawn_positions` allocates six vectors per sequence) and TJ writing ~5%;
+  building lines ~10%, mostly `WordChunk::text` and pushing the chunk
+  (`WordChunk` is several hundred bytes: picture fields inline; boxing them
+  and sharing `pdf_font` as `Rc<str>` would cut the copies and a malloc per
+  chunk); `chunk_lang` scans each word when the run has an East Asian or
+  bidi language of its own. Footnotes are laid out again by every
+  `footnote_line_heights` call (uk_commercial_lease_template ~5%). A second
+  render pass re-embeds and re-subsets every font, kerning pairs included
+  (`extract_kern_pairs` is quadratic in the used glyphs).
 - Library is single-threaded: font scanning, metrics, per-paragraph wrapping
   and XML parsing are candidates for parallelism.
 - Column balancing re-lays the region per trial (`trial_at`).
