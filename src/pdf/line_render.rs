@@ -1394,6 +1394,17 @@ pub(super) fn render_paragraph_lines(
             }
         }
 
+        if line.chunks.iter().any(|c| !c.ranges.is_empty()) {
+            super::range_links::mark_line(
+                links,
+                &line.chunks,
+                chunk_abs_x,
+                y,
+                raw_y,
+                &pdf_name_to_entry,
+            );
+        }
+
         // Decoration-only chunks (empty text with underline) also need the text-block
         // pass so their underline geometry is collected into `decorations`.
         let has_text_chunks = line
