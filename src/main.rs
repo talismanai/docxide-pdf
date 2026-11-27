@@ -34,9 +34,14 @@ struct Args {
     #[arg(long, env = "DOCXIDE_FAST_COMPRESSION", value_parser = FalseyValueParser::new())]
     fast_compression: bool,
     /// An invisible link over the text between two bookmarks, as
-    /// "START END URI [HEADING_URI]"; repeatable (replaces
-    /// DOCXIDE_RANGE_LINKS, one such line per link)
-    #[arg(long, value_name = "LINK")]
+    /// "START END URI [HEADING_URI]"; repeat for more (the environment
+    /// variable takes one link per line)
+    #[arg(
+        long,
+        value_name = "LINK",
+        env = "DOCXIDE_RANGE_LINKS",
+        value_delimiter = '\n'
+    )]
     range_link: Vec<docxide_pdf::RangeLink>,
 }
 
@@ -107,12 +112,6 @@ fn main() {
     } else {
         docxide_pdf::Compression::Smallest
     };
-    let mut range_links = args.range_link;
-    if range_links.is_empty()
-        && let Ok(links) = std::env::var("DOCXIDE_RANGE_LINKS")
-    {
-        range_links = links.lines().filter_map(|line| line.parse().ok()).collect();
-    }
     let options = docxide_pdf::ConvertOptions::new()
         .revisions(view)
         .resample_pictures(!args.no_resample)
@@ -120,7 +119,7 @@ fn main() {
         .font_cache(!args.no_font_cache)
         .debug_wrap(args.debug_wrap)
         .compression(compression)
-        .range_links(range_links);
+        .range_links(args.range_link);
     let fail = |e: &dyn std::fmt::Display| -> ! {
         eprintln!("Error: {e}");
         std::process::exit(1);
