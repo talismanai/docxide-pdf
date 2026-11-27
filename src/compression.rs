@@ -9,7 +9,7 @@
 use std::cell::Cell;
 
 /// How hard the PDF's streams are compressed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Compression {
     /// The smallest file (the default): zlib level 9 for page content and
@@ -39,6 +39,11 @@ impl Drop for Scope {
 /// Use `compression` on this thread until the returned guard drops.
 pub(crate) fn scoped(compression: Compression) -> Scope {
     Scope(CURRENT.with(|current| current.replace(compression)))
+}
+
+/// The compression in effect on this thread.
+pub(crate) fn current() -> Compression {
+    CURRENT.with(Cell::get)
 }
 
 /// `data` zlib-compressed at `smallest_level` (the level this stream uses for

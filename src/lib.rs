@@ -117,6 +117,9 @@ impl std::str::FromStr for RangeLink {
 pub struct ConvertOptions {
     revisions: RevisionView,
     resample_pictures: bool,
+    picture_resolution: f32,
+    draft_pictures: bool,
+    picture_cache: bool,
     font_dirs: Vec<PathBuf>,
     font_cache: bool,
     debug_wrap: bool,
@@ -132,6 +135,9 @@ impl Default for ConvertOptions {
         Self {
             revisions: RevisionView::Final,
             resample_pictures: true,
+            picture_resolution: pdf::DEFAULT_PICTURE_RESOLUTION,
+            draft_pictures: false,
+            picture_cache: false,
             font_dirs: Vec::new(),
             font_cache: true,
             debug_wrap: false,
@@ -162,6 +168,41 @@ impl ConvertOptions {
     /// desktop export with picture compression off.
     pub fn resample_pictures(mut self, on: bool) -> Self {
         self.resample_pictures = on;
+        self
+    }
+
+    /// The resolution pictures are resampled to: 192 ppi by default, as
+    /// Word's online export. A lower one writes a smaller file faster, with
+    /// softer pictures when zoomed in. Pictures shown above it are resampled
+    /// (above twice it under [`Compression::Fast`], unless
+    /// [`ConvertOptions::draft_pictures`]). A value that is not a positive
+    /// number keeps the current one.
+    pub fn picture_resolution(mut self, ppi: f32) -> Self {
+        if ppi.is_finite() && ppi > 0.0 {
+            self.picture_resolution = ppi;
+        } else {
+            log::warn!("ConvertOptions::picture_resolution: {ppi} is not a positive resolution");
+        }
+        self
+    }
+
+    /// Draft pictures, for a PDF shown where it is made (a live preview):
+    /// resample every picture shown above the picture resolution with the
+    /// cheap thumbnail filter, keep JPEGs that need no change as stored, and
+    /// write other pictures as JPEG without a lossless trial. Fast and small,
+    /// a little softer than Word's export.
+    pub fn draft_pictures(mut self, on: bool) -> Self {
+        self.draft_pictures = on;
+        self
+    }
+
+    /// Keep the pictures this process encodes for later conversions (off by
+    /// default): converting an edited document again reuses the pictures it
+    /// already decoded, resampled and encoded with the same settings. The
+    /// cache is shared by every conversion that turns it on, holds encoded
+    /// data only, up to 64 MiB, and drops the least recently used first.
+    pub fn picture_cache(mut self, on: bool) -> Self {
+        self.picture_cache = on;
         self
     }
 
@@ -287,11 +328,17 @@ mod tests {
         let plain = ConvertOptions::new();
         assert_eq!(plain.revisions, RevisionView::Final);
         assert!(plain.resample_pictures && plain.font_cache && !plain.debug_wrap);
+        assert_eq!(plain.picture_resolution, 192.0);
+        assert!(!plain.draft_pictures && !plain.picture_cache);
         assert!(plain.font_dirs.is_empty() && !plain.display_list);
         assert_eq!(plain.compression, Compression::Smallest);
         let built = ConvertOptions::new()
             .revisions(RevisionView::Markup)
             .resample_pictures(false)
+            .picture_resolution(144.0)
+            .picture_resolution(-1.0)
+            .draft_pictures(true)
+            .picture_cache(true)
             .font_dirs(["x"])
             .font_cache(false)
             .debug_wrap(true)
@@ -300,6 +347,8 @@ mod tests {
         assert_eq!(built.revisions, RevisionView::Markup);
         assert_eq!(built.compression, Compression::Fast);
         assert!(!built.resample_pictures && !built.font_cache && built.debug_wrap);
+        assert_eq!(built.picture_resolution, 144.0);
+        assert!(built.draft_pictures && built.picture_cache);
         assert!(built.display_list);
         assert_eq!(built.font_setup().dirs, [PathBuf::from("x")]);
     }

@@ -31,6 +31,7 @@ mod list_label;
 mod objstm;
 mod page_builder;
 mod paragraph;
+mod picture_cache;
 mod positioning;
 mod prepass;
 mod range_links;
@@ -84,7 +85,8 @@ use helpers::{
     collect_paras, draw_horizontal_rule, horizontal_border_ext, joins_border_group,
     side_border_outsets, spacing_leading,
 };
-use images::{EffectXObjs, EmbeddedImages, embed_all_images};
+pub(crate) use images::DEFAULT_PICTURE_RESOLUTION;
+use images::{EffectXObjs, EmbeddedImages, PictureSettings, embed_all_images};
 use layout::{
     CjkLayout, DualRegion, EMPTY_EFFECTS, EMPTY_INLINE_IMAGES, LineNumberArg, LineOpts,
     LinkAnnotation, LinkTagger, PUNCT_PULL_FREE, RenderOpts, TextLine, build_lines,
@@ -779,8 +781,13 @@ fn render_pass(
         &mut pdf,
         &mut alloc,
         &seen_fonts,
-        options.resample_pictures,
-        options.compression == crate::Compression::Fast,
+        PictureSettings::new(
+            options.resample_pictures,
+            options.picture_resolution,
+            options.compression == crate::Compression::Fast,
+            options.draft_pictures,
+            options.picture_cache,
+        ),
     );
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]

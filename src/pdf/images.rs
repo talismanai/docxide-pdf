@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::picture_cache::{self, Encoded, PictureKey};
+
 use crate::fonts::FontEntry;
 
 use super::canvas::{self, Content};
@@ -73,17 +75,18 @@ impl ImageKey {
     fn new(
         img: &EmbeddedImage,
         (display_width, display_height): (f32, f32),
-        resample_above: Option<f32>,
+        pictures: &PictureSettings,
     ) -> Self {
         Self {
             data: Arc::clone(&img.data),
-            target: resample_above.and_then(|threshold| {
+            target: pictures.resample_above.and_then(|threshold| {
                 downscale_target(
                     img.pixel_width,
                     img.pixel_height,
                     display_width,
                     display_height,
                     threshold,
+                    pictures.target,
                 )
             }),
             soft_edge: img
@@ -103,19 +106,19 @@ impl ImageKey {
 // photo becomes 479×320). A desktop export with picture compression off keeps
 // the source pixels instead, which is where "never downsample" came from.
 // `ConvertOptions::resample_pictures(false)` (CLI `--no-resample`,
-// `DOCXIDE_NO_RESAMPLE=1`) selects that desktop behaviour (issue #138).
-const DOWNSAMPLE_DPI_THRESHOLD: f32 = 192.0;
-const DOWNSAMPLE_DPI_TARGET: f32 = 192.0;
+// `DOCXIDE_NO_RESAMPLE=1`) selects that desktop behaviour (issue #138);
+// `ConvertOptions::picture_resolution` another target.
+pub(crate) const DEFAULT_PICTURE_RESOLUTION: f32 = 192.0;
 // A fast conversion is a screen preview: a page at 200% zoom on a 2x display
 // shows ~288 ppi, so pixels kept up to twice the target are never wasted on
 // screen, and only pictures above that pay for a decode.
-const FAST_DOWNSAMPLE_DPI_THRESHOLD: f32 = 2.0 * DOWNSAMPLE_DPI_TARGET;
+const FAST_THRESHOLD_FACTOR: f32 = 2.0;
 // Word's online export writes every JPEG at libjpeg quality 75 (all 30 across
 // six references); at 85 our files outgrew Word's once re-encoding became
 // unconditional.
 const JPEG_QUALITY: u8 = 75;
 
-/// If the picture is shown above `threshold` ppi, its pixel size at the target
+/// If the picture is shown above `threshold` ppi, its pixel size at `target`
 /// ppi. Returns `None` if no downscaling needed.
 fn downscale_target(
     pixel_w: u32,
@@ -123,6 +126,7 @@ fn downscale_target(
     display_w: f32,
     display_h: f32,
     threshold: f32,
+    target: f32,
 ) -> Option<(u32, u32)> {
     if display_w <= 0.0 || display_h <= 0.0 {
         return None;
@@ -135,8 +139,8 @@ fn downscale_target(
         return None;
     }
 
-    let target_w = ((display_w / 72.0) * DOWNSAMPLE_DPI_TARGET).round() as u32;
-    let target_h = ((display_h / 72.0) * DOWNSAMPLE_DPI_TARGET).round() as u32;
+    let target_w = ((display_w / 72.0) * target).round() as u32;
+    let target_h = ((display_h / 72.0) * target).round() as u32;
 
     if target_w >= pixel_w || target_h >= pixel_h || target_w < 4 || target_h < 4 {
         return None;
@@ -152,6 +156,108 @@ fn resize(img: &image::DynamicImage, (w, h): (u32, u32), fast: bool) -> image::D
         img.thumbnail_exact(w, h)
     } else {
         img.resize_exact(w, h, image::imageops::FilterType::Lanczos3)
+    }
+}
+
+/// How an RGB picture (not a JPEG source) is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum RgbEncoding {
+    /// JPEG or Flate, whichever is smaller, as Word's export.
+    Smaller,
+    /// Flate only: no JPEG trial encode (fast compression).
+    Flate,
+    /// JPEG only: no Flate trial (draft pictures).
+    Jpeg,
+}
+
+/// How pictures are resampled, encoded and kept, from `ConvertOptions`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PictureSettings {
+    /// Pictures shown above this resolution are resampled; `None` keeps
+    /// every picture's source pixels.
+    pub(super) resample_above: Option<f32>,
+    /// The resolution they are resampled to.
+    pub(super) target: f32,
+    /// The thumbnail filter instead of Lanczos.
+    pub(super) fast_filter: bool,
+    /// JPEGs nothing resamples or recolours are embedded as stored.
+    pub(super) keep_jpegs: bool,
+    pub(super) rgb: RgbEncoding,
+    /// Reuse pictures encoded by earlier conversions.
+    pub(super) cache: bool,
+}
+
+impl PictureSettings {
+    /// Word's export by default; a fast conversion keeps pixels up to twice
+    /// the target and skips the JPEG trial; draft pictures resample anything
+    /// above the target, cheaply, to JPEG.
+    pub(super) fn new(
+        resample: bool,
+        resolution: f32,
+        fast: bool,
+        draft: bool,
+        cache: bool,
+    ) -> Self {
+        let threshold = if fast && !draft {
+            FAST_THRESHOLD_FACTOR * resolution
+        } else {
+            resolution
+        };
+        let rgb = if draft {
+            RgbEncoding::Jpeg
+        } else if fast {
+            RgbEncoding::Flate
+        } else {
+            RgbEncoding::Smaller
+        };
+        PictureSettings {
+            resample_above: resample.then_some(threshold),
+            target: resolution,
+            fast_filter: fast || draft,
+            keep_jpegs: fast || draft,
+            rgb,
+            cache,
+        }
+    }
+}
+
+/// A JPEG decoded, resampled to `target`, recoloured and encoded again, as
+/// Word re-encodes every JPEG; `Undecodable` when that fails.
+fn encode_jpeg_source(
+    img: &EmbeddedImage,
+    target: Option<(u32, u32)>,
+    fast_filter: bool,
+) -> Encoded {
+    let cursor = std::io::Cursor::new(img.data.as_slice());
+    let reader =
+        image::ImageReader::with_format(std::io::BufReader::new(cursor), image::ImageFormat::Jpeg);
+    let Ok(decoded) = reader.decode() else {
+        return Encoded::Undecodable;
+    };
+    let resized = match target {
+        Some(size) => resize(&decoded, size, fast_filter),
+        None => decoded,
+    };
+    let mut rgb = resized.into_rgb8();
+    // ponytail: a JPEG's alphaModFix is not applied.
+    apply_blip_colors(img, &mut rgb);
+    let (width, height) = rgb.dimensions();
+    let Some(data) = encode_jpeg(&rgb) else {
+        return Encoded::Undecodable;
+    };
+    log::debug!(
+        "Re-encoded JPEG {}x{} -> {}x{} ({} -> {} bytes)",
+        img.pixel_width,
+        img.pixel_height,
+        width,
+        height,
+        img.data.len(),
+        data.len()
+    );
+    Encoded::Jpeg {
+        data,
+        width,
+        height,
     }
 }
 
@@ -208,6 +314,123 @@ fn encode_jpeg(rgb: &image::RgbImage) -> Option<Vec<u8>> {
             log::warn!("JPEG encode failed: {e}");
             None
         }
+    }
+}
+
+/// A PNG or BMP that is not kept as a palette image, decoded, resampled to
+/// `target`, recoloured, masked and encoded: everything about it that costs
+/// time, without writing to the PDF. `display_width` (points, the whole
+/// source) scales soft-edge radii.
+fn encode_raster(
+    img: &EmbeddedImage,
+    display_width: f32,
+    target: Option<(u32, u32)>,
+    pictures: &PictureSettings,
+) -> Encoded {
+    let img_fmt = match img.format {
+        ImageFormat::Bmp => image::ImageFormat::Bmp,
+        _ => image::ImageFormat::Png,
+    };
+    let cursor = std::io::Cursor::new(img.data.as_slice());
+    let reader = image::ImageReader::with_format(std::io::BufReader::new(cursor), img_fmt);
+    let decoded = match reader.decode() {
+        Ok(d) => d,
+        // Fallback: use png crate directly for PNGs the image crate's
+        // format-pinned reader can't decode
+        Err(_) => match decode_png_raw(&img.data) {
+            Some(img) => img,
+            None => return Encoded::Undecodable,
+        },
+    };
+
+    let bilevel = stored_one_bit(&img.data) && is_bilevel(&decoded);
+    let decoded = if let Some((tw, th)) = target {
+        log::debug!(
+            "Downscaling PNG/BMP {}x{} -> {}x{}",
+            decoded.width(),
+            decoded.height(),
+            tw,
+            th
+        );
+        resize(&decoded, (tw, th), pictures.fast_filter)
+    } else {
+        decoded
+    };
+
+    let rgba: image::RgbaImage = decoded.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let pixel_count = (w * h) as usize;
+
+    // Single pass: split RGBA into RGB + alpha, detect transparency
+    let mut rgb_data = Vec::with_capacity(pixel_count * 3);
+    let mut alpha_data = Vec::with_capacity(pixel_count);
+    let mut has_alpha = false;
+    for p in rgba.pixels() {
+        rgb_data.push(p.0[0]);
+        rgb_data.push(p.0[1]);
+        rgb_data.push(p.0[2]);
+        let a = p.0[3];
+        alpha_data.push(a);
+        if a < 255 {
+            has_alpha = true;
+        }
+    }
+    apply_blip_colors(img, &mut rgb_data);
+    if let Some(opacity) = img.alpha {
+        for a in &mut alpha_data {
+            *a = (*a as f32 * opacity).round() as u8;
+        }
+        has_alpha = true;
+    }
+
+    // Apply soft-edge mask: multiply with existing alpha or create new alpha
+    if let Some(se) = img.soft_edge.as_ref() {
+        let radius_px = se.radius * w as f32 / display_width;
+        let se_mask = super::color::generate_soft_edge_mask(w, h, radius_px);
+        if has_alpha {
+            for (a, &se) in alpha_data.iter_mut().zip(se_mask.iter()) {
+                *a = ((*a as u16 * se as u16) / 255) as u8;
+            }
+        } else {
+            alpha_data = se_mask;
+            has_alpha = true;
+        }
+    }
+
+    if bilevel && !has_alpha && !img.recolored() {
+        let packed = pack_bilevel(&rgb_data, w, h);
+        return Encoded::Bilevel {
+            data: crate::compression::zlib(&packed, 6),
+            width: w,
+            height: h,
+        };
+    }
+
+    let alpha = has_alpha.then(|| crate::compression::zlib(&alpha_data, 6));
+    // Word's export writes the smaller of JPEG (photographic content) and
+    // Flate (synthetic/chart images); fast and draft conversions skip one.
+    let rgb = image::RgbImage::from_raw(w, h, rgb_data).expect("RGB data size matches dimensions");
+    let flate = |rgb: &image::RgbImage| crate::compression::zlib(rgb.as_raw(), 6);
+    let (jpeg, data) = match pictures.rgb {
+        RgbEncoding::Flate => (false, flate(&rgb)),
+        RgbEncoding::Jpeg => match encode_jpeg(&rgb) {
+            Some(jpeg) => (true, jpeg),
+            None => (false, flate(&rgb)),
+        },
+        RgbEncoding::Smaller => {
+            let compressed = flate(&rgb);
+            match encode_jpeg(&rgb) {
+                Some(jpeg) if jpeg.len() < compressed.len() => (true, jpeg),
+                _ => (false, compressed),
+            }
+        }
+    };
+    Encoded::Rgb {
+        jpeg,
+        data,
+        width: w,
+        height: h,
+        alpha,
     }
 }
 
@@ -458,8 +681,9 @@ struct Embedder<'a, A: FnMut() -> Ref> {
     pdf: &'a mut Pdf,
     alloc: &'a mut A,
     fonts: &'a HashMap<String, FontEntry>,
-    resample_above: Option<f32>,
-    fast: bool,
+    pictures: PictureSettings,
+    /// Content digests for the picture cache, by source buffer.
+    digests: HashMap<usize, picture_cache::Digest>,
     xobjects: ImageXObjects,
     effect_count: usize,
 }
@@ -467,6 +691,40 @@ struct Embedder<'a, A: FnMut() -> Ref> {
 impl<A: FnMut() -> Ref> Embedder<'_, A> {
     fn next_ref(&mut self) -> Ref {
         (self.alloc)()
+    }
+
+    /// `encode`'s result for this picture, from the picture cache when it is
+    /// on and holds it.
+    fn encoded(
+        &mut self,
+        img: &EmbeddedImage,
+        display_width: f32,
+        target: Option<(u32, u32)>,
+        encode: impl FnOnce() -> Encoded,
+    ) -> Arc<Encoded> {
+        if !self.pictures.cache {
+            return Arc::new(encode());
+        }
+        let digest = *self
+            .digests
+            .entry(Arc::as_ptr(&img.data) as usize)
+            .or_insert_with(|| picture_cache::Digest::of(&img.data));
+        let key = PictureKey {
+            digest,
+            format: img.format as u8,
+            target,
+            soft_edge: img
+                .soft_edge
+                .as_ref()
+                .map(|se| (se.radius.to_bits(), display_width.to_bits())),
+            lum: img.lum.map(|(b, c)| (b.to_bits(), c.to_bits())),
+            recolor: img.recolor,
+            alpha: img.alpha.map(f32::to_bits),
+            fast_filter: self.pictures.fast_filter,
+            rgb: self.pictures.rgb,
+            compression: crate::compression::current(),
+        };
+        picture_cache::get_or_insert(key, encode)
     }
 
     /// Register a written XObject under the next `Im{n}` page-resource name.
@@ -496,7 +754,7 @@ impl<A: FnMut() -> Ref> Embedder<'_, A> {
             ),
             None => (img.display_width, img.display_height),
         };
-        let key = ImageKey::new(img, display, self.resample_above);
+        let key = ImageKey::new(img, display, &self.pictures);
         let target = key.target;
         // ponytail: the reflection re-decodes the uncropped source and the soft-edge mask
         // rings the source's edges; crop those too if a fixture ever combines them.
@@ -563,45 +821,32 @@ impl<A: FnMut() -> Ref> Embedder<'_, A> {
                 // or the size.
                 // CMYK still decodes: the stored-bytes path writes no Decode
                 // array for Adobe's inverted CMYK JPEGs.
-                let keep_stored =
-                    self.fast && target.is_none() && !img.recolored() && img.jpeg_components != 4;
+                let keep_stored = self.pictures.keep_jpegs
+                    && target.is_none()
+                    && !img.recolored()
+                    && img.jpeg_components != 4;
                 if !keep_stored {
-                    let cursor = std::io::Cursor::new(img.data.as_slice());
-                    let reader = image::ImageReader::with_format(
-                        std::io::BufReader::new(cursor),
-                        image::ImageFormat::Jpeg,
-                    );
-                    if let Ok(decoded) = reader.decode() {
-                        let resized = match target {
-                            Some(size) => resize(&decoded, size, self.fast),
-                            None => decoded,
-                        };
-                        let mut rgb = resized.into_rgb8();
-                        // ponytail: a JPEG's alphaModFix is not applied.
-                        apply_blip_colors(img, &mut rgb);
-                        let (tw, th) = rgb.dimensions();
-                        if let Some(jpeg_buf) = encode_jpeg(&rgb) {
-                            log::debug!(
-                                "Re-encoded JPEG {}x{} -> {}x{} ({} -> {} bytes)",
-                                img.pixel_width,
-                                img.pixel_height,
-                                tw,
-                                th,
-                                img.data.len(),
-                                jpeg_buf.len()
-                            );
-                            let se_mask = make_soft_edge_smask(tw, th, self.pdf, self.alloc);
-                            write_image_xobject(
-                                self.pdf,
-                                xobj_ref,
-                                &jpeg_buf,
-                                Filter::DctDecode,
-                                (tw, th),
-                                3,
-                                se_mask,
-                            );
-                            return xobj_ref;
-                        }
+                    let fast_filter = self.pictures.fast_filter;
+                    let encoded = self.encoded(img, display_width, target, || {
+                        encode_jpeg_source(img, target, fast_filter)
+                    });
+                    if let Encoded::Jpeg {
+                        data,
+                        width,
+                        height,
+                    } = &*encoded
+                    {
+                        let se_mask = make_soft_edge_smask(*width, *height, self.pdf, self.alloc);
+                        write_image_xobject(
+                            self.pdf,
+                            xobj_ref,
+                            data,
+                            Filter::DctDecode,
+                            (*width, *height),
+                            3,
+                            se_mask,
+                        );
+                        return xobj_ref;
                     }
                     // Fall through to raw embed on failure
                 }
@@ -661,157 +906,93 @@ impl<A: FnMut() -> Ref> Embedder<'_, A> {
                     xobj.bits_per_component(p.bits as i32);
                     return xobj_ref;
                 }
-                let img_fmt = match img.format {
-                    ImageFormat::Bmp => image::ImageFormat::Bmp,
-                    _ => image::ImageFormat::Png,
-                };
-                let cursor = std::io::Cursor::new(img.data.as_slice());
-                let reader =
-                    image::ImageReader::with_format(std::io::BufReader::new(cursor), img_fmt);
-                let decoded = match reader.decode() {
-                    Ok(d) => d,
-                    Err(_) => {
-                        // Fallback: use png crate directly for PNGs the image
-                        // crate's format-pinned reader can't decode
-                        match decode_png_raw(&img.data) {
-                            Some(img) => img,
-                            None => {
-                                log::warn!("PNG decode failed — writing 1x1 placeholder");
-                                canvas::capture_image(
-                                    xobj_ref,
-                                    || Image {
-                                        width: 1,
-                                        height: 1,
-                                        color_space: ImageColorSpace::Rgb,
-                                        bits_per_component: 8,
-                                        filter: ImageFilter::None,
-                                        data: vec![255, 255, 255],
-                                        soft_mask: None,
-                                        interpolate: false,
-                                    },
-                                    None,
-                                );
-                                let mut xobj = self.pdf.image_xobject(xobj_ref, &[255, 255, 255]);
-                                xobj.width(1);
-                                xobj.height(1);
-                                xobj.color_space().device_rgb();
-                                xobj.bits_per_component(8);
-                                return xobj_ref;
-                            }
-                        }
+                let pictures = self.pictures;
+                let encoded = self.encoded(img, display_width, target, || {
+                    encode_raster(img, display_width, target, &pictures)
+                });
+                match &*encoded {
+                    Encoded::Bilevel {
+                        data,
+                        width,
+                        height,
+                    } => {
+                        // Word keeps a black-and-white source at 1 bit per sample
+                        // (DeviceGray, Flate, no Interpolate) even after downsampling:
+                        // geneva_waste's logo is 589 bytes in its export and was 3.7 KB
+                        // here as an RGB JPEG.
+                        let (w, h) = (*width, *height);
+                        canvas::capture_image(
+                            xobj_ref,
+                            || Image {
+                                width: w,
+                                height: h,
+                                color_space: ImageColorSpace::Gray,
+                                bits_per_component: 1,
+                                filter: ImageFilter::Flate,
+                                data: data.clone(),
+                                soft_mask: None,
+                                interpolate: false,
+                            },
+                            None,
+                        );
+                        let mut xobj = self.pdf.image_xobject(xobj_ref, data);
+                        xobj.filter(Filter::FlateDecode);
+                        xobj.width(w as i32);
+                        xobj.height(h as i32);
+                        xobj.color_space().device_gray();
+                        xobj.bits_per_component(1);
                     }
-                };
-
-                let bilevel = stored_one_bit(&img.data) && is_bilevel(&decoded);
-                let decoded = if let Some((tw, th)) = target {
-                    log::debug!(
-                        "Downscaling PNG/BMP {}x{} -> {}x{}",
-                        decoded.width(),
-                        decoded.height(),
-                        tw,
-                        th
-                    );
-                    resize(&decoded, (tw, th), self.fast)
-                } else {
-                    decoded
-                };
-
-                let rgba: image::RgbaImage = decoded.to_rgba8();
-                let (w, h) = (rgba.width(), rgba.height());
-                let pixel_count = (w * h) as usize;
-
-                // Single pass: split RGBA into RGB + alpha, detect transparency
-                let mut rgb_data = Vec::with_capacity(pixel_count * 3);
-                let mut alpha_data = Vec::with_capacity(pixel_count);
-                let mut has_alpha = false;
-                for p in rgba.pixels() {
-                    rgb_data.push(p.0[0]);
-                    rgb_data.push(p.0[1]);
-                    rgb_data.push(p.0[2]);
-                    let a = p.0[3];
-                    alpha_data.push(a);
-                    if a < 255 {
-                        has_alpha = true;
+                    Encoded::Rgb {
+                        jpeg,
+                        data,
+                        width,
+                        height,
+                        alpha,
+                    } => {
+                        let (w, h) = (*width, *height);
+                        let smask_ref = alpha.as_ref().map(|compressed_alpha| {
+                            let mask_ref = self.next_ref();
+                            // Alpha mask: no interpolate (matches Word's output on case12).
+                            write_gray_mask_xobject(
+                                self.pdf,
+                                mask_ref,
+                                compressed_alpha,
+                                w,
+                                h,
+                                false,
+                            );
+                            mask_ref
+                        });
+                        let filter = if *jpeg {
+                            Filter::DctDecode
+                        } else {
+                            Filter::FlateDecode
+                        };
+                        write_image_xobject(self.pdf, xobj_ref, data, filter, (w, h), 3, smask_ref);
                     }
-                }
-                apply_blip_colors(img, &mut rgb_data);
-                if let Some(opacity) = img.alpha {
-                    for a in &mut alpha_data {
-                        *a = (*a as f32 * opacity).round() as u8;
-                    }
-                    has_alpha = true;
-                }
-
-                // Apply soft-edge mask: multiply with existing alpha or create new alpha
-                if let Some(se) = img.soft_edge.as_ref() {
-                    let radius_px = se.radius * w as f32 / display_width;
-                    let se_mask = super::color::generate_soft_edge_mask(w, h, radius_px);
-                    if has_alpha {
-                        for (a, &se) in alpha_data.iter_mut().zip(se_mask.iter()) {
-                            *a = ((*a as u16 * se as u16) / 255) as u8;
-                        }
-                    } else {
-                        alpha_data = se_mask;
-                        has_alpha = true;
+                    Encoded::Jpeg { .. } | Encoded::Undecodable => {
+                        log::warn!("PNG decode failed — writing 1x1 placeholder");
+                        canvas::capture_image(
+                            xobj_ref,
+                            || Image {
+                                width: 1,
+                                height: 1,
+                                color_space: ImageColorSpace::Rgb,
+                                bits_per_component: 8,
+                                filter: ImageFilter::None,
+                                data: vec![255, 255, 255],
+                                soft_mask: None,
+                                interpolate: false,
+                            },
+                            None,
+                        );
+                        let mut xobj = self.pdf.image_xobject(xobj_ref, &[255, 255, 255]);
+                        xobj.width(1);
+                        xobj.height(1);
+                        xobj.color_space().device_rgb();
+                        xobj.bits_per_component(8);
                     }
                 }
-
-                // Word keeps a black-and-white source at 1 bit per sample (DeviceGray,
-                // Flate, no Interpolate) even after downsampling: geneva_waste's logo
-                // is 589 bytes in its export and was 3.7 KB here as an RGB JPEG.
-                if bilevel && !has_alpha && !img.recolored() {
-                    let packed = pack_bilevel(&rgb_data, w, h);
-                    let data = crate::compression::zlib(&packed, 6);
-                    canvas::capture_image(
-                        xobj_ref,
-                        || Image {
-                            width: w,
-                            height: h,
-                            color_space: ImageColorSpace::Gray,
-                            bits_per_component: 1,
-                            filter: ImageFilter::Flate,
-                            data: data.clone(),
-                            soft_mask: None,
-                            interpolate: false,
-                        },
-                        None,
-                    );
-                    let mut xobj = self.pdf.image_xobject(xobj_ref, &data);
-                    xobj.filter(Filter::FlateDecode);
-                    xobj.width(w as i32);
-                    xobj.height(h as i32);
-                    xobj.color_space().device_gray();
-                    xobj.bits_per_component(1);
-                    return xobj_ref;
-                }
-
-                let smask_ref = if has_alpha {
-                    let compressed_alpha = crate::compression::zlib(&alpha_data, 6);
-                    let mask_ref = self.next_ref();
-                    // Alpha mask: no interpolate (matches Word's output on case12).
-                    write_gray_mask_xobject(self.pdf, mask_ref, &compressed_alpha, w, h, false);
-                    Some(mask_ref)
-                } else {
-                    None
-                };
-
-                // Try both JPEG and Flate, pick whichever is smaller.
-                // JPEG wins for photographic content; Flate wins for synthetic/chart images.
-                let compressed_rgb = crate::compression::zlib(&rgb_data, 6);
-                let rgb = image::RgbImage::from_raw(w, h, rgb_data)
-                    .expect("RGB data size matches dimensions");
-                let jpeg_buf = if self.fast { None } else { encode_jpeg(&rgb) };
-
-                let use_jpeg = jpeg_buf
-                    .as_ref()
-                    .is_some_and(|j| j.len() < compressed_rgb.len());
-
-                let (filter, data) = if use_jpeg {
-                    (Filter::DctDecode, jpeg_buf.unwrap())
-                } else {
-                    (Filter::FlateDecode, compressed_rgb)
-                };
-                write_image_xobject(self.pdf, xobj_ref, &data, filter, (w, h), 3, smask_ref);
             }
             ImageFormat::Emf | ImageFormat::Svg => {
                 // Translate EMF records (or SVG elements) into a PDF Form XObject.
@@ -1080,20 +1261,14 @@ pub(super) fn embed_all_images(
     pdf: &mut Pdf,
     alloc: &mut impl FnMut() -> Ref,
     fonts: &HashMap<String, FontEntry>,
-    resample: bool,
-    fast: bool,
+    pictures: PictureSettings,
 ) -> EmbeddedImages {
-    let threshold = if fast {
-        FAST_DOWNSAMPLE_DPI_THRESHOLD
-    } else {
-        DOWNSAMPLE_DPI_THRESHOLD
-    };
     let mut em = Embedder {
         pdf,
         alloc,
         fonts,
-        resample_above: resample.then_some(threshold),
-        fast,
+        pictures,
+        digests: HashMap::new(),
         xobjects: ImageXObjects::default(),
         effect_count: 0,
     };
@@ -1307,6 +1482,16 @@ fn push_textbox<'a>(tb: &'a Textbox, out: &mut Vec<&'a Textbox>) {
 mod tests {
     use super::{apply_lum, crop_matrix, is_bilevel, pack_bilevel, palette_png, stored_one_bit};
 
+    /// Word's online export: resample above 192 ppi, Lanczos, no cache.
+    const ONLINE: super::PictureSettings = super::PictureSettings {
+        resample_above: Some(super::DEFAULT_PICTURE_RESOLUTION),
+        target: super::DEFAULT_PICTURE_RESOLUTION,
+        fast_filter: false,
+        keep_jpegs: false,
+        rgb: super::RgbEncoding::Smaller,
+        cache: false,
+    };
+
     #[test]
     fn mixed_cell_paragraph_pictures_are_embedded_in_all_table_stories() {
         let inputs: [&[u8]; 5] = [
@@ -1329,8 +1514,7 @@ mod tests {
                     reference
                 },
                 &std::collections::HashMap::new(),
-                true,
-                false,
+                ONLINE,
             );
             assert_eq!(images.table_cell_image_names.len(), 1);
             assert_eq!(images.image_xobjects.len(), 1);
@@ -1386,8 +1570,7 @@ mod tests {
                 pdf_writer::Ref::new(next)
             },
             &std::collections::HashMap::new(),
-            true,
-            false,
+            ONLINE,
         );
         let bytes = pdf.finish();
         let image_xobjects = bytes
