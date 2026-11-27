@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "docxide-pdf"
-version = "0.22.0-talisman.3"
+version = "0.22.0-talisman.4"
 dependencies = [
  "clap",
  "env_logger",
