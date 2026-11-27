@@ -341,7 +341,8 @@ python3 tools/font_builds.py tests/fixtures/fonts/multi_font/reference.pdf -- fo
 
 ## Contributing
 
-Pull requests are welcome!
+Pull requests are welcome! [CONTRIBUTING.md](CONTRIBUTING.md) lists the shape
+they should have.
 
 ## License
 
